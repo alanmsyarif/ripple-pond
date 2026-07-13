@@ -27,13 +27,13 @@
 #     sliders. Sim runs on timeline playback (spacebar).
 #
 #  Install: Edit > Preferences > Add-ons > Install > this file
-#  Requires Blender 5.2+ (Simulation Zones, Index of Nearest)
+#  Requires Blender 4.2+ (Simulation Zones, Index of Nearest)
 # ============================================================
 
 bl_info = {
     "name": "Ripple Forge GN",
-    "author": "Amsy",
-    "version": (0, 3, 0),
+    "author": "Amsy + Claude",
+    "version": (0, 3, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Ripple Forge",
     "description": "Geometry-Nodes interactive pond with Weta-style "
@@ -106,11 +106,14 @@ class NT:
                 return s
         return None
 
+    _UNARY = {'LENGTH', 'NORMALIZE', 'ABSOLUTE', 'SQRT', 'SINE', 'COSINE',
+              'FLOOR', 'CEIL', 'FRACT', 'SIGN', 'ROUND', 'INVERSE_SQRT'}
+
     # ---- float math ----
     def m(self, op, a, b=None, x=0, y=0):
         node = self.n('ShaderNodeMath', x, y, operation=op)
         self.w(node.inputs[0], a)
-        if b is not None:
+        if b is not None and op not in self._UNARY:
             self.w(node.inputs[1], b)
         return node.outputs[0]
 
@@ -122,10 +125,17 @@ class NT:
         return node.outputs[0]
 
     # ---- vector math ----
+    _UNARY_V = {'LENGTH', 'NORMALIZE', 'ABSOLUTE', 'FRACTION',
+                'FLOOR', 'CEIL', 'SINE', 'COSINE', 'TANGENT'}
+
     def vm(self, op, a, b=None, x=0, y=0):
+        # unary ops take no second operand — if a numeric slipped into b,
+        # it was meant as the x coordinate
+        if op in self._UNARY_V and isinstance(b, (int, float)):
+            b, x, y = None, b, x
         node = self.n('ShaderNodeVectorMath', x, y, operation=op)
         self.w(node.inputs[0], a)
-        if b is not None:
+        if b is not None and op not in self._UNARY_V:
             self.w(node.inputs[1], b)
         if op == 'LENGTH':
             return self.find(node.outputs, 'Value', 'VALUE')
@@ -209,10 +219,17 @@ class NT:
                value)
         return node.outputs['Geometry']
 
+    # attribute data-type -> socket-type vocabulary (capture_items API)
+    _CAPMAP = {'FLOAT': 'FLOAT', 'FLOAT_VECTOR': 'VECTOR',
+               'BOOLEAN': 'BOOLEAN', 'INT': 'INT'}
+
     def capture(self, geo, value, dtype='FLOAT', x=0, y=0):
         node = self.n('GeometryNodeCaptureAttribute', x, y, domain='POINT')
         if hasattr(node, 'capture_items'):        # Blender 4.2+ multi-item API
-            node.capture_items.new(dtype, "value")
+            try:
+                node.capture_items.new(self._CAPMAP.get(dtype, dtype), "value")
+            except TypeError:                     # older enum vocabulary
+                node.capture_items.new(dtype, "value")
         else:                                     # legacy single-item API
             node.data_type = dtype
         self.l(geo, node.inputs['Geometry'])
@@ -377,8 +394,8 @@ def build_water_tree():
 
     # --- foam potential: aeration proxy = curvature + velocity
     #     fluctuation + direct contact (cf. paper Sec. 5.1) ---
-    lap_a  = b.m('ABSOLUTE', lap, 120, -300)
-    vel_a  = b.m('ABSOLUTE', velz, 120, -380)
+    lap_a  = b.m('ABSOLUTE', lap, x=120, y=-300)
+    vel_a  = b.m('ABSOLUTE', velz, x=120, y=-380)
     aer    = b.m('ADD', lap_a, vel_a, 280, -340)
     gen    = b.m('MULTIPLY', aer, gin2.outputs['Foam Gain'], 420, -340)
     gen    = b.m('ADD', gen, contact, 560, -340)
@@ -387,7 +404,7 @@ def build_water_tree():
     foam_n = b.m('MAXIMUM', f_dec, gen, 700, -460)
 
     # --- wetness: latch where |h| exceeds threshold, slow dry-out ---
-    habs  = b.m('ABSOLUTE', hn, 120, -560)
+    habs  = b.m('ABSOLUTE', hn, x=120, y=-560)
     w_hit = b.n('ShaderNodeMapRange', 280, -560,
                 interpolation_type='SMOOTHSTEP')
     b.w(w_hit.inputs['Value'], habs)
@@ -534,7 +551,7 @@ def build_whitewater_tree():
     rr2 = b.m('MULTIPLY', rr, rr, -1420, 60)
     k   = b.m('SUBTRACT', 1.0, rr2, -1290, 60)
     xk  = b.m('MULTIPLY', X, k, -1290, -20)
-    den = b.m('SQRT', b.m('SUBTRACT', 1.0, xk, -1160, 0), -1040, 0)
+    den = b.m('SQRT', b.m('SUBTRACT', 1.0, xk, -1160, 0), x=-1040, y=0)
     rad0 = b.m('DIVIDE', gin.outputs['Min Radius'], den, -920, 20)
 
     # initial velocity: spray launches along surface normal
@@ -648,8 +665,8 @@ def build_whitewater_tree():
     b.l(ion.outputs['Index'], sidx.inputs['Index'])
     npos = b.find(sidx.outputs, 'Value', 'VECTOR')
     dvec = b.vm('SUBTRACT', npos, P, 1560, -1100)
-    dlen = b.vm('LENGTH', dvec, 1700, -1100)
-    ddir = b.vm('NORMALIZE', dvec, 1700, -1180)
+    dlen = b.vm('LENGTH', dvec, x=1700, y=-1100)
+    ddir = b.vm('NORMALIZE', dvec, x=1700, y=-1180)
     deff = b.m('SUBTRACT', dlen, b.m('MULTIPLY', prad, 2.0, 1700, -1260),
                1840, -1200)
     dnrm = b.m('DIVIDE', deff, gin2.outputs['Cohesion Radius'], 1960, -1200)
@@ -955,9 +972,10 @@ class RF_OT_build(bpy.types.Operator):
 
         scene.frame_start = 1
         scene.frame_set(1)
+        v = ".".join(str(i) for i in bl_info["version"])
         self.report({'INFO'},
-                    "Built. Press SPACE to play — all parameters live on "
-                    "the two Geometry Nodes modifiers.")
+                    f"Ripple Forge GN {v} — built. Press SPACE to play; all "
+                    "parameters live on the two Geometry Nodes modifiers.")
         return {'FINISHED'}
 
 # ------------------------------------------------------------
