@@ -32,7 +32,7 @@
 
 bl_info = {
     "name": "Ripple Forge GN",
-    "author": "Amsy + Claude",
+    "author": "Amsy",
     "version": (0, 3, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > Ripple Forge",
